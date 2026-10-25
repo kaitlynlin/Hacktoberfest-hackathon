@@ -1,0 +1,6 @@
+streamlit>=1.45
+openai
+google-genai
+pymupdf
+altair
+pandas
