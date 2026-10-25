@@ -5,6 +5,7 @@ run:  streamlit run app.py
 """
 
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
@@ -79,7 +80,7 @@ def file_to_parts(data: bytes, mime: str) -> list[tuple]:
         doc = pymupdf.open(stream=data, filetype="pdf")
         text = "\n".join(page.get_text() for page in doc)
         if len(text.strip()) > 300:
-            return [("text", f"SYLLABUS TEXT:\n{text[:60000]}")]
+            return [("text", f"SYLLABUS TEXT:\n{text[:25000]}")]
         # scanned pdf: render the first few pages as images
         return [("image", page.get_pixmap(dpi=130).tobytes("png"), "image/png") for page in list(doc)[:6]]
     return [("image", data, mime)]
@@ -108,15 +109,27 @@ def call_gemini(key: str, parts: list[tuple], prompt: str) -> str:
     from google.genai import types
 
     contents = [p[1] if p[0] == "text" else types.Part.from_bytes(data=p[1], mime_type=p[2]) for p in parts]
-    resp = genai.Client(api_key=key).models.generate_content(
-        model=GEMINI_MODEL, contents=contents + [prompt],
-        config=types.GenerateContentConfig(temperature=0.1),
-    )
-    return resp.text
+    # keep the client in a variable: if only .models is referenced, python closes the client mid-request
+    client = genai.Client(api_key=key)
+    try:
+        # MINIMAL thinking = way faster. pulling dates out of a syllabus doesn't need deep reasoning
+        fast = types.GenerateContentConfig(
+            temperature=0.1, thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"))
+        resp = client.models.generate_content(model=GEMINI_MODEL, contents=contents + [prompt], config=fast)
+    except Exception:
+        # older sdk / model that doesn't accept the setting -> normal (slower) call
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL, contents=contents + [prompt],
+            config=types.GenerateContentConfig(temperature=0.1),
+        )
+    # gemma 4 sends its "thinking" as separate parts; keep only the real answer
+    parts_out = resp.candidates[0].content.parts or []
+    answer = "".join(p.text or "" for p in parts_out if not getattr(p, "thought", False))
+    return answer or resp.text
 
 
-@st.cache_data(show_spinner=False)
-def extract(data: bytes, mime: str, week1: date, n_weeks: int, backend: str, _key: str, _hash: str) -> dict:
+def extract(data: bytes, mime: str, week1: date, n_weeks: int, backend: str, _key: str) -> dict:
+    """plain function (no streamlit calls) so we can run several syllabi at the same time."""
     parts, prompt = file_to_parts(data, mime), build_prompt(week1, n_weeks)
     return parse_json(call_model(backend, _key, parts, prompt))
 
@@ -259,15 +272,27 @@ if go:
     if not backend:
         st.warning("add a gemini api key (or the digitalocean backup) in the sidebar first")
         st.stop()
-    rows, bar = [], st.progress(0.0, text="reading syllabi...")
-    for i, f in enumerate(files):
-        data = f.getvalue()
-        try:
-            res = extract(data, f.type, week1, n_weeks, backend, key, hashlib.md5(data).hexdigest())
-            rows += to_rows(res, f.name.rsplit(".", 1)[0])
-        except Exception as e:  # one bad syllabus shouldn't kill the rest
-            st.error(f"couldn't read {f.name}: {e}")
-        bar.progress((i + 1) / len(files), text=f"read {i + 1}/{len(files)}")
+    rows, bar = [], st.progress(0.0, text=f"gemma is reading {len(files)} syllabi at once...")
+    cache = st.session_state.setdefault("scan_cache", {})  # don't re-scan files we've already read
+    jobs = {}
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for f in files:
+            data = f.getvalue()
+            ck = (hashlib.md5(data).hexdigest(), week1, n_weeks, backend)
+            if ck in cache:
+                rows += to_rows(cache[ck], f.name.rsplit(".", 1)[0])
+                continue
+            jobs[pool.submit(extract, data, f.type, week1, n_weeks, backend, key)] = (f, ck)
+        done = len(files) - len(jobs)
+        for fut in as_completed(jobs):
+            f, ck = jobs[fut]
+            try:
+                cache[ck] = fut.result()
+                rows += to_rows(cache[ck], f.name.rsplit(".", 1)[0])
+            except Exception as e:  # one bad syllabus shouldn't kill the rest
+                st.error(f"couldn't read {f.name}: {e}")
+            done += 1
+            bar.progress(done / len(files), text=f"read {done}/{len(files)}: {f.name}")
     bar.empty()
     if rows:
         st.session_state["df"] = fill_weeks(pd.DataFrame(rows), week1, n_weeks)
