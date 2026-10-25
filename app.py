@@ -108,7 +108,8 @@ def call_gemini(key: str, parts: list[tuple], prompt: str) -> str:
     from google.genai import types
 
     contents = [p[1] if p[0] == "text" else types.Part.from_bytes(data=p[1], mime_type=p[2]) for p in parts]
-    resp = genai.Client(api_key=key).models.generate_content(
+    client = genai.Client(api_key=key)
+    resp = client.models.generate_content(
         model=GEMINI_MODEL, contents=contents + [prompt],
         config=types.GenerateContentConfig(temperature=0.1),
     )
