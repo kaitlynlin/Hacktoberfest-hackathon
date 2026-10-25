@@ -1,6 +1,5 @@
-# 📡 crunch week radar
-
-**syllabus-to-calendar tools show you deadlines. crunch week radar shows you which weeks will actually hurt.**
+📡 Crunch Week Radar
+Syllabus-to-calendar tools show you deadlines. Crunch Week Radar shows you which weeks will actually hurt.
 
 every college student gets 4–5 syllabi at the start of the term and never lines them up. so week 5 sneaks up on you: two midterms and a problem set, worth 45% of your grades, all at once.
 
